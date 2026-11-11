@@ -1,0 +1,70 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      npm:
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+    ignore:
+      # typescript-eslint peers on `>=4.8.4 <6.1.0`, and other tooling lags the same way, so a
+      # TypeScript 7 bump breaks `npm ci` outright. Drop this once typescript-eslint accepts 7.
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
+
+  # The renderer's own dependencies (render/package.json): Playwright, which
+  # the image installs with `npm ci`. A new Playwright brings a new Chromium,
+  # so such an update can change the rendered picture, and the browser may
+  # need a system library that is not yet on the list in render/Dockerfile.
+  - package-ecosystem: npm
+    directory: '/render'
+    schedule:
+      interval: weekly
+    groups:
+      npm-render:
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+
+  # The base images of the renderer image (render/Dockerfile).
+  - package-ecosystem: docker
+    directory: '/render'
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+    ignore:
+      # A new Node.js major is a decision, not a routine update — and the
+      # image tag also names the Debian release, which has to stay the one
+      # of the final stage.
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
+
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'

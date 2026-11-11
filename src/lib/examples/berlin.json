@@ -1,0 +1,56 @@
+{
+	"title": "Berlin: among 3D buildings",
+	"description": "A low flight through the city with buildings drawn at their real heights.",
+	"version": 1,
+	"style": "colorful",
+	"labels": false,
+	"buildings3d": true,
+	"terrain": false,
+	"sky": true,
+	"keyframes": [
+		{
+			"t": 0,
+			"lng": 13.46276146718398,
+			"lat": 52.49643686692835,
+			"zoom": 15.85,
+			"pitch": 54.35294117647059,
+			"bearing": -60.46875,
+			"roll": 0,
+			"easeOut": 0
+		},
+		{
+			"t": 4.61,
+			"lng": 13.422443437867969,
+			"lat": 52.51280195061608,
+			"zoom": 15.850000003007581,
+			"pitch": 59.316671146330414,
+			"bearing": -41.221745806882836,
+			"roll": 0,
+			"waypoint": true
+		},
+		{
+			"t": 6.22,
+			"lng": 13.402248432372517,
+			"lat": 52.518786875097106,
+			"zoom": 15.850000006362611,
+			"pitch": 62.00593900201057,
+			"bearing": -79.06134267004649,
+			"roll": 0,
+			"waypoint": true
+		},
+		{
+			"t": 10,
+			"lng": 13.377619901092373,
+			"lat": 52.51629363490158,
+			"zoom": 19.16,
+			"pitch": 69.88235294117646,
+			"bearing": -93.1640625,
+			"roll": 0,
+			"hold": 1
+		}
+	],
+	"annotations": [],
+	"annotationScale": 1,
+	"aspectRatio": "16:9",
+	"defaultAnnotation": {}
+}

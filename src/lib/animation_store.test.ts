@@ -1,0 +1,865 @@
+import { describe, it, expect } from 'vitest';
+import { AnimationStore, resolveAnnotation } from './animation.svelte';
+import {
+	DEFAULT_ANNOTATION_ICON,
+	DEFAULT_ANNOTATION_LABEL_FONT,
+	DEFAULT_LABEL_DISTANCE,
+	type Annotation,
+	type CameraState
+} from './types';
+
+const cam = (lng = 0, lat = 0): CameraState => ({
+	lng,
+	lat,
+	zoom: 4,
+	pitch: 0,
+	bearing: 0,
+	roll: 0
+});
+
+const ann = (overrides: Partial<Annotation> = {}): Annotation => ({
+	lng: 0,
+	lat: 0,
+	icon: 'symbol-marker',
+	iconColor: '#cc0000',
+	label: '',
+	...overrides
+});
+
+describe('AnimationStore - construction', () => {
+	it('starts empty', () => {
+		const s = new AnimationStore();
+		expect(s.keyframes).toEqual([]);
+		expect(s.annotations).toEqual([]);
+		expect(s.totalDuration).toBe(0);
+		expect(s.selectedKeyframe).toBeNull();
+		expect(s.selectedAnnotation).toBeNull();
+	});
+});
+
+describe('AnimationStore - keyframe CRUD', () => {
+	it('addKeyframeFromCamera at t=0 inserts and selects', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam(1, 2));
+		expect(s.keyframes).toHaveLength(1);
+		expect(s.selectedIndex).toBe(0);
+		expect(s.keyframes[0]).toMatchObject({ t: 0, lng: 1, lat: 2 });
+	});
+
+	it('two consecutive adds at t=0 push the second forward by 1s', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(5, 5));
+		expect(s.keyframes).toHaveLength(2);
+		expect(s.keyframes[1].t).toBe(1);
+		expect(s.totalDuration).toBe(1);
+	});
+
+	it('addKeyframeFromCamera inserts in order when playhead is between keyframes', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam()); // t=0
+		s.addKeyframeFromCamera(cam(1, 0)); // t=1
+		s.currentTime = 0.5;
+		s.addKeyframeFromCamera(cam(0.5, 0));
+		// Expect the new one at index 1 (between 0 and 1).
+		expect(s.keyframes.map((k) => k.t)).toEqual([0, 0.5, 1]);
+		expect(s.selectedIndex).toBe(1);
+	});
+
+	it('updateSelectedFromCamera mutates only the selected keyframe', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam(0, 0));
+		s.addKeyframeFromCamera(cam(1, 1));
+		s.selectedIndex = 0;
+		s.updateSelectedFromCamera(cam(9, 9));
+		expect(s.keyframes[0]).toMatchObject({ lng: 9, lat: 9 });
+		expect(s.keyframes[1]).toMatchObject({ lng: 1, lat: 1 });
+	});
+
+	it('updateSelectedFromCamera is a no-op with no selection', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.selectedIndex = null;
+		s.updateSelectedFromCamera(cam(9, 9));
+		expect(s.keyframes[0]).toMatchObject({ lng: 0, lat: 0 });
+	});
+
+	it('setKeyframePath toggles the path field; "arc" deletes it', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.setKeyframePath(0, 'linear');
+		expect(s.keyframes[0].path).toBe('linear');
+		s.setKeyframePath(0, 'arc');
+		expect(s.keyframes[0]).not.toHaveProperty('path');
+	});
+
+	it('setKeyframeTime clamps t to ≥ 0', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam()); // t=0
+		s.addKeyframeFromCamera(cam(1, 0)); // t=1
+		// Trying to drag below 0 → clamps to 0. The existing keyframe at 0 is
+		// then nudged forward to keep them distinguishable.
+		s.setKeyframeTime(1, -10);
+		expect(s.keyframes.every((k) => k.t >= 0)).toBe(true);
+	});
+
+	it('setKeyframeTime ignores out-of-range index', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.setKeyframeTime(99, 5);
+		expect(s.keyframes[0].t).toBe(0);
+	});
+
+	it('setKeyframeTime past a neighbor reorders the array and follows the selection', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam(0, 0)); // t=0
+		s.addKeyframeFromCamera(cam(1, 0)); // t=1, lng=1 — uniquely identifies this kf
+		s.addKeyframeFromCamera(cam(2, 0)); // t=2
+		s.selectAt(1); // select the middle keyframe (lng=1)
+		s.setKeyframeTime(1, 5); // push past the t=2 neighbor
+		// Array is re-sorted; the moved keyframe is now last.
+		expect(s.keyframes.map((k) => k.t)).toEqual([0, 2, 5]);
+		// Identify the moved keyframe by its lng (1), which survived the move.
+		expect(s.keyframes[2].lng).toBe(1);
+		// Selection follows the moved keyframe to its new index.
+		expect(s.selectedIndex).toBe(2);
+	});
+
+	it('setKeyframeTime snaps t to the nearest 1/100 second', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam(0, 0)); // t=0
+		s.addKeyframeFromCamera(cam(1, 0)); // t=1
+		s.setKeyframeTime(1, 1.23456789);
+		// Snapped down to two decimal places.
+		expect(s.keyframes[1].t).toBe(1.23);
+		s.setKeyframeTime(1, 2.5078);
+		expect(s.keyframes[1].t).toBe(2.51);
+	});
+
+	it('addKeyframeFromCamera snaps the inserted t to 1/100 second', () => {
+		const s = new AnimationStore();
+		s.currentTime = 0.123456;
+		s.addKeyframeFromCamera(cam());
+		expect(s.keyframes[0].t).toBe(0.12);
+	});
+
+	it('setKeyframeTime nudges to avoid colliding with another keyframe', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(1, 0)); // t=1
+		// Try to set the first keyframe to exactly t=1; should nudge forward.
+		s.setKeyframeTime(0, 1);
+		const times = s.keyframes.map((k) => k.t).sort((a, b) => a - b);
+		expect(times[1] - times[0]).toBeGreaterThanOrEqual(0.01);
+	});
+
+	it('setKeyframeTime shifts a neighboring selection when the moved keyframe crosses over it', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam(0, 0)); // t=0
+		s.addKeyframeFromCamera(cam(1, 0)); // t=1
+		s.addKeyframeFromCamera(cam(2, 0)); // t=2
+		s.selectAt(2); // select the last keyframe
+		// Move keyframe 0 past keyframe 1 → array becomes [kf1, kf0, kf2].
+		s.setKeyframeTime(0, 1.5);
+		expect(s.keyframes[2].t).toBe(2);
+		// Selection on the last keyframe is unchanged in identity but its
+		// index shifted from 2 to… still 2, because the moved kf landed at
+		// idx 1 (not past selection).
+		expect(s.selectedIndex).toBe(2);
+	});
+
+	it('deleteAt removes the keyframe and clears selection if it was selected', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(1, 0));
+		s.selectedIndex = 0;
+		s.deleteAt(0);
+		expect(s.keyframes).toHaveLength(1);
+		expect(s.selectedIndex).toBeNull();
+	});
+
+	it('deleteAt shifts selection down for items after the deleted one', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(1, 0));
+		s.addKeyframeFromCamera(cam(2, 0));
+		s.selectedIndex = 2;
+		s.deleteAt(0);
+		expect(s.selectedIndex).toBe(1);
+	});
+
+	it('deleteAt leaves earlier selection unchanged', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(1, 0));
+		s.addKeyframeFromCamera(cam(2, 0));
+		s.selectedIndex = 0;
+		s.deleteAt(2);
+		expect(s.selectedIndex).toBe(0);
+	});
+
+	it('deleteAt ignores out-of-range index', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.deleteAt(99);
+		expect(s.keyframes).toHaveLength(1);
+	});
+});
+
+describe('AnimationStore - annotation CRUD', () => {
+	it('addAnnotation stores the annotation thin — no default-spread', () => {
+		const s = new AnimationStore();
+		s.defaultAnnotation = {
+			labelFont: 'roboto_bold_italic',
+			labelHaloWidth: 2.5
+		};
+		s.addAnnotation(ann({ label: 'X' }));
+		// Annotation stores only what the caller supplied. Per-animation
+		// defaults are NOT baked in at creation; the renderer (and any
+		// consumer that calls `resolveAnnotation`) pulls them in dynamically.
+		const a = s.annotations[0];
+		expect(a.label).toBe('X');
+		expect(a).not.toHaveProperty('labelFont');
+		expect(a).not.toHaveProperty('labelHaloWidth');
+		// …but the resolved view does see the defaults.
+		const resolved = resolveAnnotation(a, s.defaultAnnotation);
+		expect(resolved.labelFont).toBe('roboto_bold_italic');
+		expect(resolved.labelHaloWidth).toBe(2.5);
+	});
+
+	it('addAnnotation accepts a position-only annotation (no style fields)', () => {
+		const s = new AnimationStore();
+		s.addAnnotation({ lng: 1, lat: 2, label: '' });
+		const a = s.annotations[0];
+		// Pin button passes only position + label; icon/iconColor are
+		// optional and absent on the raw annotation.
+		expect(a).not.toHaveProperty('icon');
+		expect(a).not.toHaveProperty('iconColor');
+		// Resolver fills them in from the hardcoded baseline.
+		const resolved = resolveAnnotation(a, s.defaultAnnotation);
+		expect(resolved.icon).toBeDefined();
+		expect(resolved.iconColor).toBeDefined();
+	});
+
+	it('addAnnotation appends and selects it, next to the selected keyframe', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.selectedIndex = 0;
+		s.addAnnotation(ann({ lng: 5 }));
+		expect(s.annotations).toHaveLength(1);
+		expect(s.selectedAnnotationIndex).toBe(0);
+		expect(s.selectedIndex).toBe(0);
+	});
+
+	it('updateAnnotation merges patch with existing fields', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ label: 'a', rotation: 30 }));
+		s.updateAnnotation(0, { label: 'b' });
+		expect(s.annotations[0].label).toBe('b');
+		expect(s.annotations[0].rotation).toBe(30);
+	});
+
+	it('updateAnnotation deletes optional fields explicitly set to undefined', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ rotation: 30, visibleFrom: 1, visibleUntil: 5 }));
+		s.updateAnnotation(0, { rotation: undefined, visibleFrom: undefined });
+		expect(s.annotations[0]).not.toHaveProperty('rotation');
+		expect(s.annotations[0]).not.toHaveProperty('visibleFrom');
+		// visibleUntil wasn't touched
+		expect(s.annotations[0].visibleUntil).toBe(5);
+	});
+
+	it('updateAnnotation deletes any optional field set to undefined (generic)', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ iconSize: 1.5, labelFont: 'roboto_bold', labelHaloWidth: 2 }));
+		s.updateAnnotation(0, {
+			iconSize: undefined,
+			labelFont: undefined,
+			labelHaloWidth: undefined
+		});
+		expect(s.annotations[0]).not.toHaveProperty('iconSize');
+		expect(s.annotations[0]).not.toHaveProperty('labelFont');
+		expect(s.annotations[0]).not.toHaveProperty('labelHaloWidth');
+	});
+
+	it('updateAnnotation ignores out-of-range index', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann());
+		s.updateAnnotation(99, { label: 'no' });
+		expect(s.annotations[0].label).toBe('');
+	});
+
+	it('deleteAnnotation cascades selection like deleteAt', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ label: 'a' }));
+		s.addAnnotation(ann({ label: 'b' }));
+		s.addAnnotation(ann({ label: 'c' }));
+		s.selectedAnnotationIndex = 2;
+		s.deleteAnnotation(0);
+		expect(s.selectedAnnotationIndex).toBe(1);
+		expect(s.annotations.map((a) => a.label)).toEqual(['b', 'c']);
+	});
+
+	it('deleteAnnotation clears selection if the selected one was deleted', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann());
+		s.selectedAnnotationIndex = 0;
+		s.deleteAnnotation(0);
+		expect(s.selectedAnnotationIndex).toBeNull();
+	});
+
+	it('a keyframe or move and an annotation are selected independently', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam());
+		s.addAnnotation(ann());
+		s.selectAt(0);
+		expect(s.selectedAnnotationIndex).toBe(0);
+		expect(s.selectedIndex).toBe(0);
+		s.selectAnnotation(0);
+		expect(s.selectedIndex).toBe(0);
+		s.selectMove(0);
+		expect(s.selectedAnnotationIndex).toBe(0);
+		s.clearAnnotationSelection();
+		expect(s.selectedMove?.start).toBe(0);
+	});
+
+	it('duplicateAnnotation inserts a clone after the source and selects it', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ label: 'a', lng: 10, lat: 20, iconColor: '#f00' }));
+		s.duplicateAnnotation(0);
+		expect(s.annotations).toHaveLength(2);
+		expect(s.annotations[1].label).toBe('a');
+		expect(s.annotations[1].iconColor).toBe('#f00');
+		// Slight position offset so the clone is visible.
+		expect(s.annotations[1].lng).toBeCloseTo(10.001, 5);
+		expect(s.annotations[1].lat).toBeCloseTo(20.001, 5);
+		expect(s.selectedAnnotationIndex).toBe(1);
+	});
+
+	it('duplicateAnnotation ignores out-of-range indexes', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann());
+		s.duplicateAnnotation(99);
+		expect(s.annotations).toHaveLength(1);
+	});
+
+	it('reorderAnnotation moves an item and follows the selection', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ label: 'a' }));
+		s.addAnnotation(ann({ label: 'b' }));
+		s.addAnnotation(ann({ label: 'c' }));
+		s.selectedAnnotationIndex = 0; // selecting 'a'
+		// Move 'a' to slot 3 (i.e. end of array)
+		s.reorderAnnotation(0, 3);
+		expect(s.annotations.map((a) => a.label)).toEqual(['b', 'c', 'a']);
+		expect(s.selectedAnnotationIndex).toBe(2);
+	});
+
+	it('reorderAnnotation: dragging later → earlier shifts items right', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ label: 'a' }));
+		s.addAnnotation(ann({ label: 'b' }));
+		s.addAnnotation(ann({ label: 'c' }));
+		s.selectedAnnotationIndex = 0; // 'a' selected
+		// Move 'c' (idx 2) to slot 0 (insert at front)
+		s.reorderAnnotation(2, 0);
+		expect(s.annotations.map((a) => a.label)).toEqual(['c', 'a', 'b']);
+		// 'a' shifted right → was 0, now 1
+		expect(s.selectedAnnotationIndex).toBe(1);
+	});
+
+	it('reorderAnnotation is a no-op when from === to', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ label: 'a' }));
+		s.addAnnotation(ann({ label: 'b' }));
+		s.reorderAnnotation(1, 1);
+		expect(s.annotations.map((a) => a.label)).toEqual(['a', 'b']);
+	});
+
+	it('reorderAnnotation ignores out-of-range indexes', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ label: 'a' }));
+		s.addAnnotation(ann({ label: 'b' }));
+		s.reorderAnnotation(0, 99);
+		s.reorderAnnotation(99, 0);
+		expect(s.annotations.map((a) => a.label)).toEqual(['a', 'b']);
+	});
+
+	it('sampledAnnotations only returns visible ones', () => {
+		const s = new AnimationStore();
+		s.addAnnotation(ann({ visibleFrom: 0, visibleUntil: 2, label: 'early' }));
+		s.addAnnotation(ann({ visibleFrom: 5, visibleUntil: 10, label: 'late' }));
+		s.currentTime = 1;
+		expect(s.sampledAnnotations.map((a) => a.label)).toEqual(['early']);
+		s.currentTime = 6;
+		expect(s.sampledAnnotations.map((a) => a.label)).toEqual(['late']);
+	});
+});
+
+describe('resolveAnnotation', () => {
+	it('fills missing fields from the per-animation defaults', () => {
+		const out = resolveAnnotation(ann({ label: 'X' }), {
+			labelFont: 'roboto_bold_italic',
+			labelDistance: 3
+		});
+		expect(out.labelFont).toBe('roboto_bold_italic');
+		expect(out.labelDistance).toBe(3);
+	});
+
+	it('per-annotation overrides win over per-animation defaults', () => {
+		const out = resolveAnnotation(ann({ labelFont: 'lato_bold' }), {
+			labelFont: 'roboto_bold_italic'
+		});
+		expect(out.labelFont).toBe('lato_bold');
+	});
+
+	it('fields absent from both layers fall back to hardcoded baseline', () => {
+		const out = resolveAnnotation(ann(), {});
+		expect(out.icon).toBe(DEFAULT_ANNOTATION_ICON);
+		expect(out.labelFont).toBe(DEFAULT_ANNOTATION_LABEL_FONT);
+		expect(out.labelDistance).toBe(DEFAULT_LABEL_DISTANCE);
+	});
+
+	it('explicit undefined on the annotation falls through to defaults', () => {
+		// Mirrors what the per-annotation editor's "reset to default" does:
+		// `updateAnnotation` deletes keys whose patch value is undefined,
+		// but the resolver should treat an explicit-undefined the same way.
+		const raw = { ...ann(), labelFont: undefined } as Annotation;
+		const out = resolveAnnotation(raw, { labelFont: 'roboto_bold' });
+		expect(out.labelFont).toBe('roboto_bold');
+	});
+});
+
+describe('AnimationStore - playback', () => {
+	it('togglePlay does nothing with fewer than 2 keyframes', () => {
+		const s = new AnimationStore();
+		s.togglePlay();
+		expect(s.isPlaying).toBe(false);
+		s.addKeyframeFromCamera(cam());
+		s.togglePlay();
+		expect(s.isPlaying).toBe(false);
+	});
+
+	it('play restarts to t=0 if currently parked at the end', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(1, 0));
+		s.currentTime = s.totalDuration;
+		s.play();
+		expect(s.currentTime).toBe(0);
+		expect(s.isPlaying).toBe(true);
+	});
+
+	it('pause sets isPlaying false', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(1, 0));
+		s.play();
+		s.pause();
+		expect(s.isPlaying).toBe(false);
+	});
+
+	it('restart resets currentTime and stops', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addKeyframeFromCamera(cam(1, 0));
+		s.play();
+		s.currentTime = 0.5;
+		s.restart();
+		expect(s.currentTime).toBe(0);
+		expect(s.isPlaying).toBe(false);
+	});
+
+	it('seekTo clamps below 0 but not above', () => {
+		const s = new AnimationStore();
+		s.seekTo(-1);
+		expect(s.currentTime).toBe(0);
+		s.seekTo(999);
+		expect(s.currentTime).toBe(999);
+	});
+});
+
+describe('AnimationStore - load/serialise', () => {
+	it('loadFromAnimation sorts keyframes and resets selection', () => {
+		const s = new AnimationStore();
+		s.selectedIndex = 5;
+		s.loadFromAnimation({
+			version: 1,
+			style: 'colorful',
+			labels: false,
+			terrain: true,
+			sky: false,
+			keyframes: [
+				{ t: 2, lng: 0, lat: 0, zoom: 4, pitch: 0, bearing: 0, roll: 0 },
+				{ t: 0, lng: 0, lat: 0, zoom: 4, pitch: 0, bearing: 0, roll: 0 }
+			],
+			annotations: [],
+			annotationScale: 1,
+			aspectRatio: '16:9',
+			defaultAnnotation: {}
+		});
+		expect(s.keyframes.map((k) => k.t)).toEqual([0, 2]);
+		expect(s.terrain).toBe(true);
+		expect(s.selectedIndex).toBeNull();
+	});
+
+	it('toAnimation round-trips through loadFromAnimation', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam(1, 2));
+		s.addAnnotation(ann({ label: 'x' }));
+		const out = s.toAnimation();
+		const s2 = new AnimationStore();
+		s2.loadFromAnimation(out);
+		expect(s2.keyframes).toEqual(s.keyframes);
+		expect(s2.annotations).toEqual(s.annotations);
+	});
+
+	it('serialises the theme only when one is set, and reset clears it', () => {
+		const s = new AnimationStore();
+		expect(s.toAnimation()).not.toHaveProperty('theme');
+		s.theme = 'toner';
+		expect(s.toAnimation().theme).toBe('toner');
+		expect(s.mapStyleOptions.theme).toBe('toner');
+		const s2 = new AnimationStore();
+		s2.loadFromAnimation(s.toAnimation());
+		expect(s2.theme).toBe('toner');
+		s2.reset();
+		expect(s2.theme).toBeUndefined();
+	});
+
+	it('hides and shows layer groups, and serialises them only when some are hidden', () => {
+		const s = new AnimationStore();
+		expect(s.toAnimation()).not.toHaveProperty('hiddenLayers');
+		s.setLayerGroupVisible('pois', false);
+		s.setLayerGroupVisible('land', false);
+		s.setLayerGroupVisible('pois', false); // no duplicate
+		expect(s.hiddenLayers).toEqual(['land', 'pois']);
+		expect(s.mapStyleOptions.hiddenLayers).toEqual(['land', 'pois']);
+		expect(s.toAnimation().hiddenLayers).toEqual(['land', 'pois']);
+
+		const s2 = new AnimationStore();
+		s2.loadFromAnimation(s.toAnimation());
+		expect(s2.hiddenLayers).toEqual(['land', 'pois']);
+
+		s.setLayerGroupVisible('land', true);
+		s.setLayerGroupVisible('pois', true);
+		expect(s.toAnimation()).not.toHaveProperty('hiddenLayers');
+		s2.reset();
+		expect(s2.hiddenLayers).toEqual([]);
+	});
+
+	it('serialises buildings3d only when it is on', () => {
+		const s = new AnimationStore();
+		expect(s.toAnimation()).not.toHaveProperty('buildings3d');
+		s.buildings3d = true;
+		expect(s.mapStyleOptions.buildings3d).toBe(true);
+		expect(s.toAnimation().buildings3d).toBe(true);
+		const s2 = new AnimationStore();
+		s2.loadFromAnimation(s.toAnimation());
+		expect(s2.buildings3d).toBe(true);
+		s2.reset();
+		expect(s2.buildings3d).toBe(false);
+	});
+
+	it('serialises the sun only when it is set', () => {
+		const s = new AnimationStore();
+		expect(s.toAnimation()).not.toHaveProperty('sun');
+		s.sun = { direction: 135, altitude: 20 };
+		expect(s.mapStyleOptions.sun).toEqual({ direction: 135, altitude: 20 });
+		expect(s.toAnimation().sun).toEqual({ direction: 135, altitude: 20 });
+		const s2 = new AnimationStore();
+		s2.loadFromAnimation(s.toAnimation());
+		expect(s2.sun).toEqual({ direction: 135, altitude: 20 });
+		s2.reset();
+		expect(s2.sun).toBeUndefined();
+	});
+
+	it('serialises the projection only for the globe, and samples the camera in it', () => {
+		const s = new AnimationStore();
+		expect(s.toAnimation()).not.toHaveProperty('projection');
+		s.loadFromAnimation({
+			...s.toAnimation(),
+			keyframes: [
+				{ t: 0, lng: 0, lat: 60, zoom: 2, pitch: 0, bearing: 0, roll: 0, path: 'linear' },
+				{ t: 4, lng: 40, lat: 0, zoom: 3, pitch: 0, bearing: 0, roll: 0 }
+			]
+		});
+		s.seekTo(2);
+		const mercator = s.sampledCamera;
+		s.projection = 'globe';
+		expect(s.mapStyleOptions.projection).toBe('globe');
+		expect(s.toAnimation().projection).toBe('globe');
+		expect(s.sampledCamera?.zoom).not.toBeCloseTo(mercator!.zoom, 2);
+		const s2 = new AnimationStore();
+		s2.loadFromAnimation(s.toAnimation());
+		expect(s2.projection).toBe('globe');
+		s2.reset();
+		expect(s2.projection).toBe('mercator');
+	});
+
+	it('serialises the anchor only when it is off centre', () => {
+		const s = new AnimationStore();
+		expect(s.anchor).toEqual({ x: 0.5, y: 0.5 });
+		expect(s.toAnimation()).not.toHaveProperty('anchor');
+		s.anchor = { x: 0.25, y: 0.7 };
+		expect(s.toAnimation().anchor).toEqual({ x: 0.25, y: 0.7 });
+		const s2 = new AnimationStore();
+		s2.loadFromAnimation(s.toAnimation());
+		expect(s2.anchor).toEqual({ x: 0.25, y: 0.7 });
+		s2.reset();
+		expect(s2.anchor).toEqual({ x: 0.5, y: 0.5 });
+	});
+
+	it('turns a keyframe into a waypoint and back, keeping it through a save', () => {
+		const s = new AnimationStore();
+		const kf = (t: number) => ({ t, lng: t * 10, lat: 0, zoom: 5, pitch: 0, bearing: 0, roll: 0 });
+		s.loadFromAnimation({ ...s.toAnimation(), keyframes: [kf(0), kf(1), kf(2)] });
+		s.seekTo(1);
+		const resting = s.sampledCamera;
+		s.setKeyframeWaypoint(1, true);
+		expect(s.keyframes[1].waypoint).toBe(true);
+		expect(s.toAnimation().keyframes[1].waypoint).toBe(true);
+		// Same view at the keyframe itself; the difference is the speed around it.
+		expect(s.sampledCamera).toMatchObject({ lng: resting!.lng, lat: resting!.lat });
+		s.seekTo(1.2);
+		const flying = s.sampledCamera!.lng;
+		s.setKeyframeWaypoint(1, false);
+		expect(s.keyframes[1]).not.toHaveProperty('waypoint');
+		expect(s.sampledCamera!.lng).toBeLessThan(flying);
+		// Retiming keeps the flag on the keyframe it belongs to.
+		s.setKeyframeWaypoint(1, true);
+		s.setKeyframeTime(1, 5);
+		expect(s.keyframes.map((k) => k.waypoint === true)).toEqual([false, false, true]);
+	});
+
+	it('selects a move, and never together with a keyframe or an annotation', () => {
+		const s = new AnimationStore();
+		const kf = (t: number, extra: object = {}) => ({
+			t,
+			lng: t * 10,
+			lat: 0,
+			zoom: 5,
+			pitch: 0,
+			bearing: 0,
+			roll: 0,
+			...extra
+		});
+		s.loadFromAnimation({
+			...s.toAnimation(),
+			keyframes: [kf(0), kf(1, { waypoint: true }), kf(2), kf(3)]
+		});
+		expect(s.moves.map((m) => [m.start, m.end, m.kind])).toEqual([
+			[0, 2, 'curve'],
+			[2, 3, 'arc']
+		]);
+		s.selectAt(0);
+		s.selectMove(2);
+		expect(s.selectedMove).toEqual({ start: 2, end: 3, kind: 'arc' });
+		expect(s.selectedIndex).toBeNull();
+		// A keyframe that starts no move cannot be selected as one.
+		s.selectMove(1);
+		expect(s.selectedMove?.start).toBe(2);
+		// The style of the move is the path of the stop it starts from.
+		s.setKeyframePath(2, 'linear');
+		expect(s.selectedMove?.kind).toBe('linear');
+		s.selectAt(3);
+		expect(s.selectedMove).toBeNull();
+		s.selectMove(0);
+		s.clearMoveSelection();
+		expect(s.selectedMove).toBeNull();
+		s.selectMove(0);
+		s.reset();
+		expect(s.selectedMove).toBeNull();
+	});
+
+	it('restores an earlier state and stays where the editor was', () => {
+		const s = new AnimationStore();
+		const kf = (t: number) => ({ t, lng: t * 10, lat: 0, zoom: 5, pitch: 0, bearing: 0, roll: 0 });
+		s.loadFromAnimation({ ...s.toAnimation(), keyframes: [kf(0), kf(2), kf(4)] });
+		const before = s.toAnimation();
+		s.selectAt(2);
+		s.seekTo(3);
+		s.deleteAt(2);
+		s.restoreAnimation(before);
+		expect(s.keyframes).toHaveLength(3);
+		expect(s.currentTime).toBe(3);
+		// What no longer exists is not selected, and the playhead stays inside.
+		s.selectAt(2);
+		s.seekTo(4);
+		s.restoreAnimation({ ...before, keyframes: [kf(0), kf(2)] });
+		expect(s.selectedIndex).toBeNull();
+		expect(s.currentTime).toBe(2);
+		s.selectMove(0);
+		s.restoreAnimation(before);
+		expect(s.selectedMove?.start).toBe(0);
+	});
+
+	it('sets how a stop eases, and drops it with the default or on a waypoint', () => {
+		const s = new AnimationStore();
+		const kf = (t: number) => ({ t, lng: t * 10, lat: 0, zoom: 5, pitch: 0, bearing: 0, roll: 0 });
+		s.loadFromAnimation({ ...s.toAnimation(), keyframes: [kf(0), kf(1), kf(2)] });
+		s.seekTo(0.5);
+		const before = s.sampledCamera!.lng;
+		s.setKeyframeEase(0, 'easeOut', 0);
+		expect(s.keyframes[0].easeOut).toBe(0);
+		expect(s.sampledCamera!.lng).toBeGreaterThan(before);
+		expect(s.toAnimation().keyframes[0].easeOut).toBe(0);
+		// On the grid, within 0…1.
+		s.setKeyframeEase(1, 'easeIn', 0.337);
+		s.setKeyframeEase(1, 'easeOut', 7);
+		expect(s.keyframes[1]).toMatchObject({ easeIn: 0.34, easeOut: 1 });
+		s.setKeyframeEase(1, 'easeIn', null);
+		expect(s.keyframes[1]).not.toHaveProperty('easeIn');
+		s.setKeyframeWaypoint(1, true);
+		expect(s.keyframes[1]).not.toHaveProperty('easeOut');
+		s.setKeyframeEase(1, 'easeOut', 0.5);
+		expect(s.keyframes[1]).not.toHaveProperty('easeOut');
+	});
+
+	describe('hold', () => {
+		const kf = (t: number, extra: object = {}) => ({
+			t,
+			lng: t * 10,
+			lat: 0,
+			zoom: 5,
+			pitch: 0,
+			bearing: 0,
+			roll: 0,
+			...extra
+		});
+		const load = (keyframes: object[], annotations: object[] = []) => {
+			const s = new AnimationStore();
+			s.loadFromAnimation({ ...s.toAnimation(), keyframes, annotations } as never);
+			return s;
+		};
+		const times = (s: AnimationStore) => s.keyframes.map((k) => k.t);
+
+		it('inserts the time at the stop: later keyframes move along', () => {
+			const s = load([kf(0), kf(2), kf(5)]);
+			s.setKeyframeHold(1, 3);
+			expect(s.keyframes[1].hold).toBe(3);
+			expect(times(s)).toEqual([0, 2, 8]);
+			expect(s.totalDuration).toBe(8);
+			s.setKeyframeHold(1, 1);
+			expect(times(s)).toEqual([0, 2, 6]);
+			s.setKeyframeHold(1, 0);
+			expect(s.keyframes[1]).not.toHaveProperty('hold');
+			expect(times(s)).toEqual([0, 2, 5]);
+		});
+
+		it('counts a hold on the last stop into the duration', () => {
+			const s = load([kf(0), kf(2)]);
+			s.setKeyframeHold(1, 1.5);
+			expect(s.totalDuration).toBe(3.5);
+			s.seekTo(3);
+			expect(s.sampledCamera).toMatchObject({ lng: 20 });
+		});
+
+		it('moves the annotations after the stop along, and leaves earlier ones alone', () => {
+			const s = load(
+				[kf(0), kf(2), kf(5)],
+				[
+					{ lng: 0, lat: 0, label: 'before', visibleFrom: 0.5, visibleUntil: 1.5 },
+					{ lng: 0, lat: 0, label: 'across', visibleFrom: 1, visibleUntil: 4 },
+					{ lng: 0, lat: 0, label: 'after', visibleFrom: 3, visibleUntil: 5 },
+					{ lng: 0, lat: 0, label: 'always' }
+				]
+			);
+			s.setKeyframeHold(1, 2);
+			expect(s.annotations.map((a) => [a.visibleFrom, a.visibleUntil])).toEqual([
+				[0.5, 1.5],
+				[1, 6],
+				[5, 7],
+				[undefined, undefined]
+			]);
+		});
+
+		it('snaps to the grid, never goes negative, and is not for waypoints', () => {
+			const s = load([kf(0), kf(2, { waypoint: true }), kf(5)]);
+			s.setKeyframeHold(0, 1.234);
+			expect(s.keyframes[0].hold).toBe(1.23);
+			s.setKeyframeHold(0, -4);
+			expect(s.keyframes[0]).not.toHaveProperty('hold');
+			expect(times(s)).toEqual([0, 2, 5]);
+			s.setKeyframeHold(1, 2);
+			expect(s.keyframes[1]).not.toHaveProperty('hold');
+		});
+
+		it('is dropped when the stop becomes a waypoint', () => {
+			const s = load([kf(0), kf(2, { hold: 2 }), kf(6)]);
+			s.setKeyframeWaypoint(1, true);
+			expect(s.keyframes[1]).not.toHaveProperty('hold');
+			expect(times(s)).toEqual([0, 2, 6]);
+		});
+
+		it('keeps keyframes out of each other when one is retimed', () => {
+			const s = load([kf(0), kf(2, { hold: 2 }), kf(6)]);
+			// Dropped into the hold of another stop: it lands right after it.
+			s.setKeyframeTime(2, 3);
+			expect(times(s)).toEqual([0, 2, 4.01]);
+			// Its own hold must not cover a later keyframe either.
+			s.setKeyframeTime(1, 3);
+			expect(s.keyframes.map((k) => [k.t, k.hold ?? 0])).toEqual([
+				[0, 0],
+				[4.01, 0],
+				[4.02, 2]
+			]);
+		});
+
+		it('does not add a keyframe inside a hold', () => {
+			const s = load([kf(0), kf(2, { hold: 2 })]);
+			s.seekTo(3);
+			s.addKeyframeFromCamera({ lng: 1, lat: 1, zoom: 1, pitch: 0, bearing: 0, roll: 0 });
+			expect(times(s)).toEqual([0, 2, 5]);
+		});
+	});
+
+	it('puts loaded keyframes on the time grid, and typed times too', () => {
+		const s = new AnimationStore();
+		const kf = (t: number, extra: object = {}) => ({
+			t,
+			lng: t,
+			lat: 0,
+			zoom: 5,
+			pitch: 0,
+			bearing: 0,
+			roll: 0,
+			...extra
+		});
+		s.loadFromAnimation({
+			...s.toAnimation(),
+			keyframes: [kf(0.004), kf(1.2345, { hold: 0.999 }), kf(7.7777)]
+		});
+		expect(s.keyframes.map((k) => [k.t, k.hold ?? 0])).toEqual([
+			[0, 0],
+			[1.23, 1],
+			[7.78, 0]
+		]);
+		expect(s.totalDuration).toBe(7.78);
+		// What a number typed into the Time field does.
+		s.selectAt(2);
+		s.setKeyframeTime(2, 5.5049);
+		expect(s.keyframes[2].t).toBe(5.5);
+		// Typed onto another keyframe: it lands one step behind it.
+		s.setKeyframeTime(2, 0);
+		expect(s.keyframes.map((k) => k.t)).toEqual([0, 0.01, 1.23]);
+		expect(s.selectedIndex).toBe(1);
+	});
+
+	it('reset returns the store to an empty state', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam());
+		s.addAnnotation(ann());
+		s.reset();
+		expect(s.keyframes).toEqual([]);
+		expect(s.annotations).toEqual([]);
+	});
+
+	it('cameraAtKeyframe returns camera or null', () => {
+		const s = new AnimationStore();
+		s.addKeyframeFromCamera(cam(3, 4));
+		expect(s.cameraAtKeyframe(0)).toMatchObject({ lng: 3, lat: 4 });
+		expect(s.cameraAtKeyframe(99)).toBeNull();
+	});
+});

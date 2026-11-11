@@ -1,0 +1,153 @@
+name: CI
+
+# Changes that touch nothing but documentation start no run: neither the
+# site nor the images contain these files.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/FUNDING.yml'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/FUNDING.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per-branch group: a new push or PR-update supersedes any in-flight run on
+  # the same ref. Pages deploys are atomic, so cancelling mid-deploy is safe.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, type-check, test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Codecov uses GitHub's OIDC token to authenticate without a secret on
+      # public repos. Tightly scoped to this job so the rest of the workflow
+      # keeps the default minimal permissions.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Prettier
+        run: npm run format:check
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: svelte-check
+        run: npm run check:svelte
+
+      - name: Vitest with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v7
+        with:
+          files: ./coverage/lcov.info
+          use_oidc: true
+          fail_ci_if_error: false
+
+  e2e:
+    name: End-to-end tests
+    runs-on: ubuntu-latest
+    # The tests load tiles, glyphs and sprites from tiles.versatiles.org. If
+    # that is slow or down, the job fails for no fault of the commit — so it
+    # reports, but neither the build nor the deploy waits for it.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium
+        run: npm run test:e2e:install
+
+      - name: Build
+        run: npm run build
+
+      - name: Playwright
+        run: npm run test:e2e
+
+  build:
+    name: Build
+    needs: check
+    runs-on: ubuntu-latest
+    outputs:
+      base_path: ${{ steps.pages.outputs.base_path }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v6
+
+      - run: npm ci
+
+      - name: Build
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: npm run build
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: build/
+
+  image:
+    name: Render image
+    # Pull requests build the images in docker.yml's own run; here they are
+    # pushed, and only once the tests have passed.
+    if: github.event_name != 'pull_request'
+    needs: check
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,14 @@
+{
+	"extends": "$app/tsconfig",
+	"include": ["src", "tests", "scripts", "*"],
+	"exclude": ["src/service-worker"],
+	"compilerOptions": {
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+		"moduleResolution": "bundler"
+	}
+}

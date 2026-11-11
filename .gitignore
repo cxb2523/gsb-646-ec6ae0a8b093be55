@@ -1,0 +1,24 @@
+node_modules/
+.svelte-kit/
+build/
+coverage/
+server/data/
+*.mp4
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*

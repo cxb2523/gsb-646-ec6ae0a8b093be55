@@ -1,0 +1,4 @@
+# Hosted but not publicly linked.
+# Keep search engines from surfacing it.
+User-agent: *
+Disallow: /

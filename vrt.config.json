@@ -1,0 +1,14 @@
+{
+	"deps-graph": {
+		"include": ["src", "render", "server"],
+		"barrel": ["src/lib/examples"],
+		"merge-outgoing": ["src/lib/components/*"],
+		"exclude": [
+			"server/test-certificate.mjs",
+			"src/lib/components/Icon.svelte",
+			"src/lib/types.ts",
+			"src/lib/fonts.ts"
+		],
+		"svg": "docs/dependency-graph.svg"
+	}
+}
